@@ -146,6 +146,7 @@ def sasl_digest_md5(connection, controls):
 
     digest_response += b'response="' + md5_hex(md5_kd(md5_hex(md5_h(a1)), b':'.join([nonce, b'00000001', cnonce, qop, md5_hex(md5_h(a2))]))) + b'"'
 
+    connection.rebind_in_progress = False
     result = send_sasl_negotiation(connection, controls, digest_response)
     return result
 

@@ -869,7 +869,8 @@ class BaseStrategy(object):
             log(NETWORK, 'sending 1 ldap message for <%s>', self.connection)
         try:
             encoded_message = encode(ldap_message)
-            if self.connection.sasl_mechanism == DIGEST_MD5 and self.connection._digest_md5_kic and not self.connection.sasl_in_progress:
+            mustbe_cleartext = self.connection.sasl_in_progress and not self.connection.rebind_in_progress
+            if self.connection._digest_md5_kic and not mustbe_cleartext:
                 # If we are using DIGEST-MD5 and LDAP signing is enabled: add a signature to the message
                 sec_num = self.connection._digest_md5_sec_num  # added underscore GC
                 kic = self.connection._digest_md5_kic  # lowercase GC
@@ -881,11 +882,11 @@ class BaseStrategy(object):
                 # RFC 2831 encrypt: encoded_message = sizeOf(ciphertext + 0x0001 +secNum) + CIPHER(encoded_message + pad + signature) + 0x0001 + secNum
                 encoded_message = int(len(payload) + 2 + 4).to_bytes(4, 'big') + payload + int(1).to_bytes(2, 'big') + int(sec_num).to_bytes(4, 'big')
                 self.connection._digest_md5_sec_num += 1
-            elif self.connection.session_security == ENCRYPT and not self.connection.sasl_in_progress:
-                if self.connection.authentication == NTLM:
+            elif self.connection.session_security == ENCRYPT and not mustbe_cleartext:
+                if self.connection.ntlm_client:
                     # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/115f9c7d-bc30-4262-ae96-254555c14ea6
                     encoded_message = self.connection.ntlm_client.seal(encoded_message)
-                elif self.connection.sasl_mechanism == GSSAPI:
+                elif self.connection.krb_ctx:
                     if posix_gssapi_unavailable:
                         import winkerberos
                         winkerberos.authGSSClientWrap(self.connection.krb_ctx, base64.b64encode(encoded_message).decode('utf-8'), None, 1)

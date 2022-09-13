@@ -247,8 +247,9 @@ def _posix_sasl_gssapi(connection, controls):
         unwrapped_token = ctx.unwrap(in_token)
         client_security_layers = _common_process_end_token_get_security_layers(unwrapped_token.message, connection.session_security)
         out_token = ctx.wrap(bytes(client_security_layers)+authz_id, False)
+        sasl_result =  send_sasl_negotiation(connection, controls, out_token.message)
         connection.krb_ctx = ctx
-        return send_sasl_negotiation(connection, controls, out_token.message)
+        return sasl_result
     except (gssapi.exceptions.GSSError, LDAPCommunicationError):
         abort_sasl_negotiation(connection, controls)
         raise

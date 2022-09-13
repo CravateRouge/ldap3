@@ -264,6 +264,8 @@ class Connection(object):
             self.socket = None
             self.tls_started = False
             self.sasl_in_progress = False
+            self.rebind_in_progress = False
+            self.ntlm_client = None
             self.read_only = read_only
             self._context_state = []
             self._deferred_open = False
@@ -727,7 +729,7 @@ class Connection(object):
             #     self.user = safe_dn(self.user)
             #     if log_enabled(EXTENDED):
             #         log(EXTENDED, 'user name sanitized to <%s> for rebind via <%s>', self.user, self)
-
+            self.rebind_in_progress = True
             if not self.strategy.pooled:
                 try:
                     return self.bind(read_server_info, controls)
@@ -1345,7 +1347,6 @@ class Connection(object):
         self.last_error = None
         with self.connection_lock:
             result = None
-
             if not self.sasl_in_progress:
                 self.sasl_in_progress = True
                 try:
@@ -1353,12 +1354,19 @@ class Connection(object):
                         result = sasl_external(self, controls)
                     elif self.sasl_mechanism == DIGEST_MD5:
                         result = sasl_digest_md5(self, controls)
+                        self.krb_ctx = None
                     elif self.sasl_mechanism == GSSAPI:
                         from ..protocol.sasl.kerberos import sasl_gssapi  # needs the gssapi package
                         result = sasl_gssapi(self, controls)
+                        self._digest_md5_kcc_cipher = None
+                        self._digest_md5_kcs_cipher = None
+                        self._digest_md5_kic = None
+                        self._digest_md5_kis = None
                     elif self.sasl_mechanism == 'PLAIN':
                         result = sasl_plain(self, controls)
                 finally:
+                    self.rebind_in_progress = False
+                    self.ntlm_client = None
                     self.sasl_in_progress = False
 
             if log_enabled(BASIC):
@@ -1373,18 +1381,18 @@ class Connection(object):
         self.last_error = None
         with self.connection_lock:
             if not self.sasl_in_progress:
-                self.sasl_in_progress = True  # ntlm is same of sasl authentication
+                self.sasl_in_progress = True # ntlm is same of sasl authentication
                 try:
                     # additional import for NTLM
-                    from ..utils.ntlm import NtlmClient
+                    from ldap3.utils.ntlm import NtlmClient
                     domain_name, user_name = self.user.split('\\', 1)
-                    self.ntlm_client = NtlmClient(user_name=user_name, domain=domain_name, password=self.password)
+                    new_ntlm_client = NtlmClient(user_name=user_name, domain=domain_name, password=self.password)
                     if self.session_security == ENCRYPT:
-                        self.ntlm_client.confidentiality = True
+                        new_ntlm_client.confidentiality = True
 
                     # as per https://msdn.microsoft.com/en-us/library/cc223501.aspx
                     # send a sicilyPackageDiscovery request (in the bindRequest)
-                    request = bind_operation(self.version, 'SICILY_PACKAGE_DISCOVERY', self.ntlm_client)
+                    request = bind_operation(self.version, 'SICILY_PACKAGE_DISCOVERY', new_ntlm_client)
                     if log_enabled(PROTOCOL):
                         log(PROTOCOL, 'NTLM SICILY PACKAGE DISCOVERY request sent via <%s>', self)
                     response = self.post_send_single_response(self.send('bindRequest', request, controls))
@@ -1395,9 +1403,15 @@ class Connection(object):
                     if 'server_creds' in result:
                         sicily_packages = result['server_creds'].decode('ascii').split(';')
                         if 'NTLM' in sicily_packages:  # NTLM available on server
-                            request = bind_operation(self.version, 'SICILY_NEGOTIATE_NTLM', self.ntlm_client)
+                            request = bind_operation(self.version, 'SICILY_NEGOTIATE_NTLM', new_ntlm_client)
                             if log_enabled(PROTOCOL):
                                 log(PROTOCOL, 'NTLM SICILY NEGOTIATE request sent via <%s>', self)
+                            self.rebind_in_progress = False
+                            self._digest_md5_kcc_cipher = None
+                            self._digest_md5_kcs_cipher = None
+                            self._digest_md5_kic = None
+                            self._digest_md5_kis = None
+                            self.krb_ctx = None
                             response = self.post_send_single_response(self.send('bindRequest', request, controls))
                             if not self.strategy.sync:
                                 _, result = self.get_response(response)
@@ -1408,7 +1422,7 @@ class Connection(object):
                                 result = response[0]
 
                             if result['result'] == RESULT_SUCCESS:
-                                request = bind_operation(self.version, 'SICILY_RESPONSE_NTLM', self.ntlm_client,
+                                request = bind_operation(self.version, 'SICILY_RESPONSE_NTLM', new_ntlm_client,
                                                          result['server_creds'])
                                 if log_enabled(PROTOCOL):
                                     log(PROTOCOL, 'NTLM SICILY RESPONSE NTLM request sent via <%s>', self)
@@ -1419,6 +1433,7 @@ class Connection(object):
                                     if log_enabled(PROTOCOL):
                                         log(PROTOCOL, 'NTLM BIND response <%s> received via <%s>', response[0], self)
                                     result = response[0]
+                                self.ntlm_client = new_ntlm_client
                     else:
                         result = None
                 finally:
